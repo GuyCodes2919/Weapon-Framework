@@ -1,10 +1,16 @@
 -- Weapon Framework Application
 
 --[[
- I decided to build a fully functional weapon system with OOP, recoil, ammo, raycasting etc as I think it would be the best 
- method for me to showcase my skills in the field. I wanted to try out using private state closures, while i could use __newindex metamethod 
- I went with the state table to keep the code clean and readable, I have used this method before and it works well.
-]]--
+	It implements a client-side weapon framework using:
+	- Object-Oriented pattern using metatables
+	- Private state for the weapon and its state
+	- ContextActionService for input handling instead of UserInputService
+	- Flipper: A open-source animation library mainly for sway/bob movements of the viewmodel
+	- ReplicatedStorage for shared assets and remote events
+	-- RemoteEvents for Damaging & Ammo Signal for demo purpose
+	-- RunService for smooth frame-by-frame synchronization
+	-- A client side ammo GUI handling done through a client-script (Not Included Here)
+]]
 
 -- Services
 local RunService = game:GetService("RunService")
@@ -12,13 +18,20 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local UserInputService = game:GetService("UserInputService")
 local Players = game:GetService("Players")
 local Workspace = game:GetService("Workspace")
+local ContextActionService = game:GetService("ContextActionService")
+local TweenService = game:GetService("TweenService")
+local Debris = game:GetService("Debris")
 local Camera = Workspace.CurrentCamera
+local LocalPlayer = Players.LocalPlayer
+
+-- OPEN SOURCE LIBRARY FOR SMOOTH MOTIONS
+local Flipper = require(ReplicatedStorage.Packages.Flipper)
+
 -- REMOTE EVENTS 
 local ammoEvent = ReplicatedStorage:WaitForChild("AmmoChanged")
+
 -- A damage signal to tell the server to damage a humanoid for demo purposes
 local DamageHum = ReplicatedStorage:WaitForChild("DamageHum") 
-
-
 local ViewModel = ReplicatedStorage.ViewModel -- Default ViewModel
 
 local Weapon = {}
@@ -36,12 +49,17 @@ local FALLOFF_END = 500 -- // studs
 -- If headshot then do twice the damage
 local HEADSHOT_MULTIPLIER = 2
 
+-- For ContextActionService Handler 
+local handleFire
+local handleReload
+
 -- Added a utility function to validate configuration values
 local function validateConfig(config: any)
 	assert(type(config) == "table", "Weapon config must be a table")
 	assert(type(config.Magsize) == "number", "Magsize must be a number")
 	assert(type(config.FireRate) == "number", "FireRate must be a number")
 end
+
 
 -- Constuctor
 function Weapon.new(config: any) --// config data may include ammo, magSize, FireRate, etc
@@ -74,11 +92,13 @@ function Weapon.new(config: any) --// config data may include ammo, magSize, Fir
 	return self
 end
 
+
 -- Functions
 function Weapon:Equip(player: Player)
 	if self.Equipped then return end
 	self.Equipped = true
 	self.Player = player
+	self.Mouse = LocalPlayer:GetMouse()
 
 	-- Clone ViewModel and store reference
 	self.ClonedViewModel = self.ViewModel:Clone()
@@ -93,24 +113,73 @@ function Weapon:Equip(player: Player)
 		end
 	end
 
-	-- Align PrimaryPart with camera
+	-- Create Flipper motors for sway (mouse movement and bobbing)
+	-- SignalMotor.new() creates a spring-driven motor starting at 0
+	local swayXMotor = Flipper.SingleMotor.new(0) -- horizontal sway
+	local swayYMotor = Flipper.SingleMotor.new(0) -- vertical sway
+	
+	local bobXMotor = Flipper.SingleMotor.new(0) -- horizontal bobbing
+	local bobYMotor = Flipper.SingleMotor.new(0) -- vertical bobbing
+	
+	-- RenderStepped connection for smooth frame-by-frame updates
 	self.RenderConnection = RunService.RenderStepped:Connect(function()
-		if self.ClonedViewModel and self.ClonedViewModel.PrimaryPart then
-			local s = state[self]
-	
-			-- Smooth sway based on mouse delta 
-			local mouseDelta = UserInputService:GetMouseDelta()/50 
-			-- Clamped the mousedelta value to avoid any extreme sway on high DPI mouses
-			local SwayX = math.clamp(mouseDelta.X, -.2, .2) 
-			local SwayY = math.clamp(mouseDelta.Y, -.2, .2)
-			s.SwayCF = s.SwayCF:Lerp(CFrame.new(SwayY, SwayX, 0), 0.3) -- Used :Lerp Instead for smoothness and preventing jitters
-			
-			-- I believe :PivotTo is preferred for model transforms
-			-- But I am going to use :SetPrimaryCFrame for simplicity 
-			self.ClonedViewModel:SetPrimaryPartCFrame(Camera.CFrame * self.ViewModelOffset * s.SwayCF)
+		if not self.ClonedViewModel or not self.ClonedViewModel.PrimaryPart then return end
+		local s = state[self]
+
+		-- Mouse-based target values
+		local mouseDelta = UserInputService:GetMouseDelta() / 50
+		-- Clamped the mousedelta value to avoid any extreme sway on high DPI mouses
+		local targetSwayX = math.clamp(mouseDelta.X, -.2, .2)
+		local targetSwayY = math.clamp(mouseDelta.Y, -.2, .2)
+
+		-- Set spring goals for sway motors
+		-- Flipper.Spring.new() defines how "springy" you want the motion
+		swayXMotor:setGoal(Flipper.Spring.new(targetSwayX, { frequency = 4, dampingRatio = 1 }))
+		swayYMotor:setGoal(Flipper.Spring.new(targetSwayY, { frequency = 4, dampingRatio = 1 }))
+
+		-- Bob based on walk speed
+		local humanoid = self.Player.Character and self.Player.Character:FindFirstChild("Humanoid")
+		local rootPart = self.Player.Character:FindFirstChild("HumanoidRootPart")
+		local speed = 0
+		if humanoid and rootPart then
+			speed = Vector3.new(rootPart.Velocity.X, 0, rootPart.Velocity.Z).Magnitude -- horizontal speed
 		end
+		local bobIntensity = math.clamp(speed / 16, 0, 1)  -- [0,1] for intensity
+		
+		local bobXTarget, bobYTarget = 0, 0
+		if bobIntensity > 0 then
+			local time = os.clock()
+			-- Forward/back bob along camera's look vector
+			local forward = Camera.CFrame.LookVector
+			local right = Camera.CFrame.RightVector
+
+			-- slower at low speed, faster at high speed
+			local frequency = 6 + speed * 0.1
+
+			-- Bob along forward/back
+			bobYTarget = math.sin(time * frequency) * 0.03 * bobIntensity
+			-- Bob along sideways (strafe)
+			bobXTarget = math.sin(time * frequency * 0.5) * 0.02 * bobIntensity
+		end
+		
+		-- Setting the spring goal using bob motors
+		bobXMotor:setGoal(Flipper.Spring.new(bobXTarget, { frequency = 3, dampingRatio = 1 }))
+		bobYMotor:setGoal(Flipper.Spring.new(bobYTarget, { frequency = 3, dampingRatio = 1 }))
+
+		-- Combine sway + bob
+		local swayX = swayXMotor:getValue()
+		local swayY = swayYMotor:getValue()
+		local bobX = bobXMotor:getValue()
+		local bobY = bobYMotor:getValue()
+		
+		-- Combine Sway and Bob into a single CFrame Offset
+		local finalCF = CFrame.new(bobY + swayY, swayX + bobX, 0)
+		s.SwayCF = finalCF -- storing the final offset in weapon's private state
+
+		-- Applying the offset to the viewmodel PrimaryPart
+		-- Multiply the Camera CFrame by the offset to move the viewmodel
+		self.ClonedViewModel:SetPrimaryPartCFrame(Camera.CFrame * self.ViewModelOffset * s.SwayCF)
 	end)
-	
 	local s = state[self]
 	
 	ammoEvent:Fire(s.Ammo, s.MaxAmmo)
@@ -125,6 +194,24 @@ function Weapon:Equip(player: Player)
 	for _, sound in pairs(self.ClonedViewModel.Sounds:GetChildren()) do
 		self.LoadedSounds[sound.Name] = sound
 	end
+	
+	-- Storing the reference of the weapon so ContextActionService handler can forward inputs
+	Weapon._ActiveWeapon = self
+	
+	-- Bind weapon action through ContextActionService instad of UserInputService
+	-- it keeps input logic separate from weapon logic and makes it easier to remove on unequip
+	ContextActionService:BindAction(
+		"WeaponFire",
+		handleFire, 
+		false,
+		Enum.UserInputType.MouseButton1
+	)
+	ContextActionService:BindAction(
+		"WeaponReload",
+		handleReload, 
+		false,
+		Enum.KeyCode.R
+	)
 end
 
 
@@ -146,9 +233,15 @@ function Weapon:Unequip(player: Player)
 		self.ClonedViewModel = nil
 	end
 	
-	self.Player = nil
-	self.Mouse = nil
-	s.Reloading = false
+	self.Player = nil -- Ensure player reference is cleared
+	self.Mouse = nil -- Ensure mouse is cleared
+	s.Reloading = false -- Ensure reloading state is reset
+	
+	-- Unbind actions on unequip to ensure only active weapon receives input
+	ContextActionService:UnbindAction("WeaponFire")
+	ContextActionService:UnbindAction("WeaponReload")
+	-- Clear the active weapon reference when unequipped
+	Weapon._ActiveWeapon = nil
 end
 
 -- Damage Calculation with distance-based falloff
@@ -183,14 +276,57 @@ local function createbulletTrail(startPos, endPos)
 	trailPart.Parent = Workspace --// Parent the trail part to Workspace
 	trailPart.Transparency = 0.5 --// Transparency of the trail part
 
-	game.Debris:AddItem(trailPart, 0.1) -- auto remove after .1s to prevent lag 
+	Debris:AddItem(trailPart, 0.1) -- auto remove after .1s to prevent lag 
+end
+
+-- Shows damage numbers floating up when you hit something
+-- Not the most efficient way of doing it but it works
+function Weapon:CreateDamageIndicator(position: Vector3, damage: number, isHeadshot: boolean)
+	local indicator = Instance.new("Part")
+	indicator.Size = Vector3.new(0.1, 0.1, 0.1)
+	indicator.Transparency = 1
+	indicator.CanCollide = false
+	indicator.Anchored = true
+	indicator.CFrame = CFrame.new(position)
+	indicator.Parent = Workspace
+
+	local gui = Instance.new("BillboardGui")
+	gui.Size = UDim2.new(0, 100, 0, 50)
+	gui.StudsOffset = Vector3.new(0, 2, 0)
+	gui.AlwaysOnTop = true
+	gui.Parent = indicator
+
+	local dmgText = Instance.new("TextLabel")
+	dmgText.Size = UDim2.new(1, 0, 1, 0)
+	dmgText.BackgroundTransparency = 1
+	-- The text is the damage amount 
+	dmgText.Text = "-" .. math.floor(damage)
+	-- Change color to red for headshots
+	dmgText.TextColor3 = isHeadshot and Color3.new(1, 0.2, 0.2) or Color3.new(1, 1, 1) 
+	dmgText.TextScaled = true
+	dmgText.Font = Enum.Font.GothamBold
+	dmgText.Parent = gui
+
+	-- Basing tweening on gui for fading and floating effect
+	local floatUp = TweenService:Create(gui, TweenInfo.new(0.8, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),{StudsOffset = Vector3.new(0, 4, 0)})
+
+	local fadeOut = TweenService:Create(dmgText,TweenInfo.new(0.8, Enum.EasingStyle.Quad),{TextTransparency = 1})
+
+	floatUp:Play()
+	fadeOut:Play()
+
+	fadeOut.Completed:Once(function()
+		indicator:Destroy()
+	end)
+	-- If it fails to destroy, it will be destroyed by the Debris service after 2 second
+	Debris:AddItem(indicator, 2)
 end
 
 function Weapon:Fire(player, mouse)
 	local s = state[self]
 	if not self.Equipped or s.Reloading then return end
 	
-	local now = tick()
+	local now = os.clock()
 	
 	-- Check if the player is firing too fast (Slight Delay)
 	if now - s.LastFire < s.FireRate then return end
@@ -215,7 +351,7 @@ function Weapon:Fire(player, mouse)
 	local startPos = Camera.CFrame.Position
 	local Range = 500
 	local aimDirection = (MouseTarget - startPos).Unit
-	local size = .3
+	local size = .6 -- Size of the spherecast
 	
 	-- Raycast Params
 	local params = RaycastParams.new()
@@ -223,7 +359,7 @@ function Weapon:Fire(player, mouse)
 	params.FilterDescendantsInstances = {self.ClonedViewModel, self.Player.Character} -- Avoids the ViewModel and the Player's Character
 	params.IgnoreWater = true
 	
-	-- Used Spherecast instead of Raycast because it is more reliable and accurate.
+	-- Used Spherecast instead of Raycast because it is more reliable and efficient.
 	local result = Workspace:Spherecast(startPos, size, aimDirection * Range, params)
 	
 	if result then
@@ -241,6 +377,7 @@ function Weapon:Fire(player, mouse)
 			-- humanoid.Health -= damage (NOT IDEAL)
 			-- BETTER WAY: Notify the server to deal damage to the humanoid by passing it
 			DamageHum:FireServer(humanoid, damage) 
+			self:CreateDamageIndicator(result.Position, damage, hitPart.Name == "Head")
 		end
 	end
 	
@@ -298,7 +435,7 @@ function Weapon:Reload()
 	end
 end
 
--- Recoil Pattern that simulates incrementing vertical kick
+-- Recoil Pattern that simulates incrementing vertical kick (Simple Recoil-System)
 local recoil = {
 	CFrame.Angles(math.rad(2), math.rad(0), 0);
 	CFrame.Angles(math.rad(1), math.rad(0), 0);
@@ -313,6 +450,44 @@ function Weapon:ShootRecoil()
 	
 	-- Multiplaying current Camera.CFrame by the current Recoil for the Vertical kick
 	Camera.CFrame = Camera.CFrame * recoil[s.RecoilIndex] 
+end
+
+-- ContextActionService Handlers 
+-- These functions forward input to the weapon object
+local firing = false
+
+handleFire = function(actionName, inputState)
+	local weapon = Weapon._ActiveWeapon
+	if not weapon then return Enum.ContextActionResult.Pass end
+
+	if inputState == Enum.UserInputState.Begin then
+		firing = true
+		-- Start a loop that fires as long as player holds mouse
+		task.spawn(function()
+			while firing and weapon and weapon.Equipped do
+				weapon:Fire(weapon.Player, weapon.Mouse) 
+				task.wait(weapon.FireRate)
+			end
+		end)
+	elseif inputState == Enum.UserInputState.End then
+		firing = false -- stops firing loop when mouse released
+	end
+
+	return Enum.ContextActionResult.Sink
+end
+
+handleReload = function(actionName, inputState)
+	-- Only react to input begin events
+	if inputState ~= Enum.UserInputState.Begin then
+		return Enum.ContextActionResult.Pass
+	end
+
+	local weapon = Weapon._ActiveWeapon
+	if weapon then
+		weapon:Reload() -- Reload the weapon
+	end
+
+	return Enum.ContextActionResult.Sink
 end
 
 return Weapon
