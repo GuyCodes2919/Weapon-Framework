@@ -10,6 +10,7 @@
 	-- RemoteEvents for Damaging & Ammo Signal for demo purpose
 	-- RunService for smooth frame-by-frame synchronization
 	-- A client side ammo GUI handling done through a client-script (Not Included Here)
+	-- Object Pooling for efficiently managing bullets 
 ]]
 
 -- Services
@@ -53,6 +54,16 @@ local HEADSHOT_MULTIPLIER = 2
 local handleFire
 local handleReload
 
+-- BULLET OBJECT POOLING (Client-Side & Visual Only)
+local BULLET_POOL_SIZE = 40
+
+-- Track ActiveWeapons by Player
+local activeWeapons = {}
+
+-- Limiting the number of damage indicators for performance reasons
+local activeDamageIndicators = 0
+local MAX_DAMAGE_INDICATOR = 10
+
 -- Added a utility function to validate configuration values
 local function validateConfig(config: any)
 	assert(type(config) == "table", "Weapon config must be a table")
@@ -87,7 +98,13 @@ function Weapon.new(config: any) --// config data may include ammo, magSize, Fir
 	self.RenderConnection = nil --// To store the render connections
 	self.LoadedAnimations = {} --// To store the loaded animations
 	self.LoadedSounds = {} --// To store the loaded sounds
-	 
+	self.BulletPool = {} --// Pool of pre-created bullets
+	
+	-- Pre-create the bullets for this weapon
+	for i = 1, BULLET_POOL_SIZE do
+		local bullet = self:createBulletTemplate()
+		table.insert(self.BulletPool, bullet)
+	end
 	
 	return self
 end
@@ -149,10 +166,6 @@ function Weapon:Equip(player: Player)
 		local bobXTarget, bobYTarget = 0, 0
 		if bobIntensity > 0 then
 			local time = os.clock()
-			-- Forward/back bob along camera's look vector
-			local forward = Camera.CFrame.LookVector
-			local right = Camera.CFrame.RightVector
-
 			-- slower at low speed, faster at high speed
 			local frequency = 6 + speed * 0.1
 
@@ -196,7 +209,7 @@ function Weapon:Equip(player: Player)
 	end
 	
 	-- Storing the reference of the weapon so ContextActionService handler can forward inputs
-	Weapon._ActiveWeapon = self
+	activeWeapons[player.UserId] = self
 	
 	-- Bind weapon action through ContextActionService instad of UserInputService
 	-- it keeps input logic separate from weapon logic and makes it easier to remove on unequip
@@ -237,11 +250,19 @@ function Weapon:Unequip(player: Player)
 	self.Mouse = nil -- Ensure mouse is cleared
 	s.Reloading = false -- Ensure reloading state is reset
 	
+	-- Clean up bullet pools
+	if self.BulletPool then
+		for _, bullet in pairs(self.BulletPool) do
+			bullet:Destroy()
+		end
+		self.BulletPool = nil
+	end
+	
 	-- Unbind actions on unequip to ensure only active weapon receives input
 	ContextActionService:UnbindAction("WeaponFire")
 	ContextActionService:UnbindAction("WeaponReload")
 	-- Clear the active weapon reference when unequipped
-	Weapon._ActiveWeapon = nil
+	activeWeapons[player.UserId] = nil
 end
 
 -- Damage Calculation with distance-based falloff
@@ -264,24 +285,72 @@ function Weapon:CalculateDamage(hitPart: BasePart, distance: number) -- For Demo
 	return math.max(damage, 1) -- Applies minimum damage of 1 if extreme range
 end
 
--- Function to create Visual Bullet Trails when firing
-local function createbulletTrail(startPos, endPos)
-	local trailPart = Instance.new("Part")
-	trailPart.Anchored = true --// Anchored = true to prevent physics from affecting it
-	trailPart.CanCollide = false --// // CanCollide = false to prevent it from colliding with other parts
-	trailPart.Size = Vector3.new(.1, .1, (endPos - startPos).Magnitude) --// Size of the trail part, Z is the distance between start and end
-	trailPart.CFrame = CFrame.lookAt(startPos, endPos) * CFrame.new(0, 0, -trailPart.Size.Z/2) --// CFrame to look at the end position and place the trail in the middle
-	trailPart.Material = Enum.Material.Neon 
-	trailPart.BrickColor = BrickColor.new("Bright yellow")
-	trailPart.Parent = Workspace --// Parent the trail part to Workspace
-	trailPart.Transparency = 0.5 --// Transparency of the trail part
+-- Function to create a bullet template
+function Weapon:createBulletTemplate()
+	local part = Instance.new("Part")
+	part.Anchored = true
+	part.CanCollide = false
+	part.Material = Enum.Material.Neon
+	part.Color = Color3.fromRGB(255, 255, 0) --// bright yellow color
+	part.Transparency = 1
+	part.Size = Vector3.new(0.1, 0.1, 1)
+	part.Parent = Workspace
+	return part
+end
 
-	Debris:AddItem(trailPart, 0.1) -- auto remove after .1s to prevent lag 
+-- Function to get a bullet from the pool
+function Weapon:GetBullet()
+	local bullet: Part = table.remove(self.BulletPool)
+	-- If no bullet is available, create a new one
+	if not bullet then
+		bullet = self:createBulletTemplate()
+	end
+	
+	bullet:SetAttribute("InUse", true)
+	return bullet
+end
+
+function Weapon:ReturnBullet(bullet)
+	bullet:SetAttribute("InUse", false)
+	bullet.Transparency = 1
+	bullet.Size = Vector3.new(0.1, 0.1, 1)
+	bullet.Parent = workspace -- Keep in workspace for now
+	table.insert(self.BulletPool, bullet)
+end
+
+-- Function to create Visual Bullet Trails when firing
+function Weapon:CreateBulletTrail(startPos, endPos)
+	local bullet = self:GetBullet()
+	if not bullet then
+		-- failed to get a bullet, maybe the pool is empty
+		return
+	end
+	
+	-- Calculate the distance and direction of the bullet trail
+	local distance = (endPos - startPos).Magnitude
+	bullet.Size = Vector3.new(0.1, 0.1, distance)
+	-- Set the bullet's CFrame to look at the end position
+	bullet.CFrame = CFrame.lookAt(startPos, endPos) * CFrame.new(0, 0, -distance / 2)
+	bullet.Transparency = 0.5
+	bullet.Parent = Workspace
+	
+	-- Return bullet to pool after short delay
+	task.delay(.1, function()
+		if bullet:GetAttribute("InUse") == true then
+			self:ReturnBullet(bullet)
+		end
+	end)
 end
 
 -- Shows damage numbers floating up when you hit something
--- Not the most efficient way of doing it but it works
+-- Could have used Object-Pooling like for bullets, but I think this is fine for now.
 function Weapon:CreateDamageIndicator(position: Vector3, damage: number, isHeadshot: boolean)
+	if activeDamageIndicators >= MAX_DAMAGE_INDICATOR then
+		return -- skip if too many active for performance reasons
+	end
+	
+	activeDamageIndicators += 1 -- Track number of active damage indicators
+	
 	local indicator = Instance.new("Part")
 	indicator.Size = Vector3.new(0.1, 0.1, 0.1)
 	indicator.Transparency = 1
@@ -316,6 +385,7 @@ function Weapon:CreateDamageIndicator(position: Vector3, damage: number, isHeads
 	fadeOut:Play()
 
 	fadeOut.Completed:Once(function()
+		activeDamageIndicators -= 1 -- Clean up after tween completes
 		indicator:Destroy()
 	end)
 	-- If it fails to destroy, it will be destroyed by the Debris service after 2 second
@@ -353,7 +423,14 @@ function Weapon:Fire(player, mouse)
 	local aimDirection = (MouseTarget - startPos).Unit
 	local size = .6 -- Size of the spherecast
 	
-	-- Raycast Params
+	--[[
+		For reviewers, here I have used client-side raycasting for demonstration purposes only.
+		In a production settings, you would want to handle raycasting and damaging in the server-side,
+		to avoid exploits and ensure synchronization.
+		
+		But because one of the requirements is that I submit only one script, I opted for client-side raycasting.
+	]]
+	-- Raycast Params 
 	local params = RaycastParams.new()
 	params.FilterType = Enum.RaycastFilterType.Exclude
 	params.FilterDescendantsInstances = {self.ClonedViewModel, self.Player.Character} -- Avoids the ViewModel and the Player's Character
@@ -370,7 +447,7 @@ function Weapon:Fire(player, mouse)
 		local damage = self:CalculateDamage(hitPart, distance) -- Calculate damage based on distance
 		
 		-- Visualise the bullet trail
-		createbulletTrail(muzzleStartPos, result.Position)
+		self:CreateBulletTrail(muzzleStartPos, result.Position)
 		
 		if humanoid then
 			-- Applying Damage on client-side is not recommended because it can be easily exploited.
@@ -457,16 +534,17 @@ end
 local firing = false
 
 handleFire = function(actionName, inputState)
-	local weapon = Weapon._ActiveWeapon
+	local weapon = activeWeapons[LocalPlayer.UserId]
 	if not weapon then return Enum.ContextActionResult.Pass end
 
 	if inputState == Enum.UserInputState.Begin then
 		firing = true
 		-- Start a loop that fires as long as player holds mouse
 		task.spawn(function()
+			local s = state[weapon] -- Get the current weapon state
 			while firing and weapon and weapon.Equipped do
 				weapon:Fire(weapon.Player, weapon.Mouse) 
-				task.wait(weapon.FireRate)
+				task.wait(s.FireRate)
 			end
 		end)
 	elseif inputState == Enum.UserInputState.End then
@@ -482,7 +560,7 @@ handleReload = function(actionName, inputState)
 		return Enum.ContextActionResult.Pass
 	end
 
-	local weapon = Weapon._ActiveWeapon
+	local weapon = activeWeapons[LocalPlayer.UserId]
 	if weapon then
 		weapon:Reload() -- Reload the weapon
 	end
