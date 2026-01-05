@@ -41,7 +41,7 @@ local Weapon = {}
 Weapon.__index = Weapon -- OOP
 
 -- Private State Storage
-local state = {}
+local state = setmetatable({}, {__mode = "k"}) -- __mode = "k" creates a weak table
 
 -- Weapon Base Damage
 local BASE_DAMAGE = 10
@@ -101,6 +101,8 @@ function Weapon.new(config: any) --// config data may include ammo, magSize, Fir
 	self.LoadedAnimations = {} --// To store the loaded animations
 	self.LoadedSounds = {} --// To store the loaded sounds
 	self.BulletPool = {} --// Pool of pre-created bullets
+	self.ActiveBullets = {} --// To store the active bullets
+	self.Motors = {} --// To store the flipper motors
 	
 	-- Pre-create the bullets for this weapon
 	for i = 1, BULLET_POOL_SIZE do
@@ -134,11 +136,11 @@ function Weapon:Equip(player: Player)
 
 	-- Create Flipper motors for sway (mouse movement and bobbing)
 	-- SignalMotor.new() creates a spring-driven motor starting at 0
-	local swayXMotor = Flipper.SingleMotor.new(0) -- horizontal sway
-	local swayYMotor = Flipper.SingleMotor.new(0) -- vertical sway
+	self.Motors.swayX = Flipper.SingleMotor.new(0) -- horizontal sway
+	self.Motors.swayY = Flipper.SingleMotor.new(0) -- vertical sway
 	
-	local bobXMotor = Flipper.SingleMotor.new(0) -- horizontal bobbing
-	local bobYMotor = Flipper.SingleMotor.new(0) -- vertical bobbing
+	self.Motors.bobX = Flipper.SingleMotor.new(0) -- horizontal bobbing
+	self.Motors.bobY = Flipper.SingleMotor.new(0) -- vertical bobbing
 	
 	-- RenderStepped connection for smooth frame-by-frame updates
 	self.RenderConnection = RunService.RenderStepped:Connect(function()
@@ -153,8 +155,8 @@ function Weapon:Equip(player: Player)
 
 		-- Set spring goals for sway motors
 		-- Flipper.Spring.new() defines how "springy" you want the motion
-		swayXMotor:setGoal(Flipper.Spring.new(targetSwayX, { frequency = 4, dampingRatio = 1 }))
-		swayYMotor:setGoal(Flipper.Spring.new(targetSwayY, { frequency = 4, dampingRatio = 1 }))
+		self.Motors.swayX:setGoal(Flipper.Spring.new(targetSwayX, { frequency = 4, dampingRatio = 1 }))
+		self.Motors.swayY:setGoal(Flipper.Spring.new(targetSwayY, { frequency = 4, dampingRatio = 1 }))
 
 		-- Bob based on walk speed
 		local humanoid = self.Player.Character and self.Player.Character:FindFirstChild("Humanoid")
@@ -178,20 +180,12 @@ function Weapon:Equip(player: Player)
 		end
 		
 		-- Setting the spring goal using bob motors
-		bobXMotor:setGoal(Flipper.Spring.new(bobXTarget, { frequency = 3, dampingRatio = 1 }))
-		bobYMotor:setGoal(Flipper.Spring.new(bobYTarget, { frequency = 3, dampingRatio = 1 }))
+		self.Motors.bobX:setGoal(Flipper.Spring.new(bobXTarget, { frequency = 3, dampingRatio = 1 }))
+		self.Motors.bobY:setGoal(Flipper.Spring.new(bobYTarget, { frequency = 3, dampingRatio = 1 }))
 
 		-- Combine sway + bob
-		-- Also store the values in the weapon's state to destroy it later
-		self.FlipperMotors = {
-			swayX = swayXMotor:getValue(),
-			swayY = swayYMotor:getValue(),
-			bobX = bobXMotor:getValue(),
-			bobY = bobYMotor:getValue()
-		}
-		
 		-- Combine Sway and Bob into a single CFrame Offset
-		local finalCF = CFrame.new(self.FlipperMotors.bobY + self.FlipperMotors.swayY, self.FlipperMotors.swayX + self.FlipperMotors.bobX, 0)
+		local finalCF = CFrame.new(self.Motors.bobY:getValue() + self.Motors.swayY:getValue(), self.Motors.bobX:getValue() + self.Motors.swayX:getValue(), 0)
 		s.SwayCF = finalCF -- storing the final offset in weapon's private state
 
 		-- Applying the offset to the viewmodel PrimaryPart
@@ -238,12 +232,11 @@ function Weapon:Unequip(player: Player)
 	self.Equipped = false
 	local s = state[self]
 	
-	-- Destroy the Flipper Motors (IMPORTANT to prevent memory leaks)
-	if self.FlipperMotors then
-		for _, motor in pairs(self.FlipperMotors) do
-			motor:Destroy()
+	if self.Motors then
+		for key, motor in pairs(self.Motors) do
+			motor:destroy() -- Flipper uses lowercase :destroy()
+			self.Motors[key] = nil
 		end
-		self.FlipperMotors = nil
 	end
 	
 	-- Disconnect RenderStepped connection
@@ -251,6 +244,13 @@ function Weapon:Unequip(player: Player)
 	if self.RenderConnection then
 		self.RenderConnection:Disconnect()
 		self.RenderConnection = nil
+	end
+	
+	-- Stop Animations
+	for name, track in pairs(self.LoadedAnimations) do
+		track:Stop()
+		track:Destroy()
+		self.LoadedAnimations[name] = nil
 	end
 	
 	-- Destroy ViewModel
@@ -261,21 +261,13 @@ function Weapon:Unequip(player: Player)
 	
 	self.Player = nil -- Ensure player reference is cleared
 	self.Mouse = nil -- Ensure mouse is cleared
-	s.Reloading = false -- Ensure reloading state is reset
+	if s then s.Reloading = false end -- Ensure reloading state is reset
 	
 	-- Clean up bullet pools
-	if self.BulletPool then
-		for _, bullet in pairs(self.BulletPool) do
-			bullet:Destroy()
-		end
-		self.BulletPool = nil
+	for _, bullet in pairs(self.ActiveBullets) do
+		if bullet then bullet:Destroy() end
 	end
-	-- Also destroy any active bullets
-	for _, bullet in pairs(workspace:GetChildren()) do
-		if bullet:IsA("Part") and bullet:GetAttribute("InUse") then
-			bullet:Destroy()
-		end
-	end
+	table.clear(self.ActiveBullets) 
 	
 	-- Unbind actions on unequip to ensure only active weapon receives input
 	ContextActionService:UnbindAction("WeaponFire")
@@ -326,6 +318,7 @@ function Weapon:GetBullet()
 	end
 	
 	bullet:SetAttribute("InUse", true)
+	table.insert(self.ActiveBullets, bullet) -- Track for cleanup
 	return bullet
 end
 
@@ -333,7 +326,10 @@ function Weapon:ReturnBullet(bullet)
 	bullet:SetAttribute("InUse", false)
 	bullet.Transparency = 1
 	bullet.Size = Vector3.new(0.1, 0.1, 1)
-	bullet.Parent = workspace -- Keep in workspace for now
+	bullet.Parent = nil
+	-- Remove from active tracking
+	local idx = table.find(self.ActiveBullets, bullet)
+	if idx then table.remove(self.ActiveBullets, idx) end
 	table.insert(self.BulletPool, bullet)
 end
 
