@@ -11,6 +11,8 @@
 	-- RunService for smooth frame-by-frame synchronization
 	-- A client side ammo GUI handling done through a client-script (Not Included Here)
 	-- Object Pooling for efficiently managing bullets 
+	-- A demo zombie spawner has been added for demo purposes which might not be the best for performance (Not Included Here)
+	
 ]]
 
 -- Services
@@ -180,13 +182,16 @@ function Weapon:Equip(player: Player)
 		bobYMotor:setGoal(Flipper.Spring.new(bobYTarget, { frequency = 3, dampingRatio = 1 }))
 
 		-- Combine sway + bob
-		local swayX = swayXMotor:getValue()
-		local swayY = swayYMotor:getValue()
-		local bobX = bobXMotor:getValue()
-		local bobY = bobYMotor:getValue()
+		-- Also store the values in the weapon's state to destroy it later
+		self.FlipperMotors = {
+			swayX = swayXMotor:getValue(),
+			swayY = swayYMotor:getValue(),
+			bobX = bobXMotor:getValue(),
+			bobY = bobYMotor:getValue()
+		}
 		
 		-- Combine Sway and Bob into a single CFrame Offset
-		local finalCF = CFrame.new(bobY + swayY, swayX + bobX, 0)
+		local finalCF = CFrame.new(self.FlipperMotors.bobY + self.FlipperMotors.swayY, self.FlipperMotors.swayX + self.FlipperMotors.bobX, 0)
 		s.SwayCF = finalCF -- storing the final offset in weapon's private state
 
 		-- Applying the offset to the viewmodel PrimaryPart
@@ -233,6 +238,14 @@ function Weapon:Unequip(player: Player)
 	self.Equipped = false
 	local s = state[self]
 	
+	-- Destroy the Flipper Motors (IMPORTANT to prevent memory leaks)
+	if self.FlipperMotors then
+		for _, motor in pairs(self.FlipperMotors) do
+			motor:Destroy()
+		end
+		self.FlipperMotors = nil
+	end
+	
 	-- Disconnect RenderStepped connection
 	-- THIS IS IMPORTANT to prevent memory leaks
 	if self.RenderConnection then
@@ -256,6 +269,12 @@ function Weapon:Unequip(player: Player)
 			bullet:Destroy()
 		end
 		self.BulletPool = nil
+	end
+	-- Also destroy any active bullets
+	for _, bullet in pairs(workspace:GetChildren()) do
+		if bullet:IsA("Part") and bullet:GetAttribute("InUse") then
+			bullet:Destroy()
+		end
 	end
 	
 	-- Unbind actions on unequip to ensure only active weapon receives input
