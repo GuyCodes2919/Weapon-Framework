@@ -119,7 +119,8 @@ function Weapon:Equip(player: Player)
 	if self.Equipped then return end
 	self.Equipped = true
 	self.Player = player
-	-- GetMouse used for simplicity, but in production you should use UserInputService and Raycasting
+	-- GetMouse used for simplicity
+	-- Production level can get rays from Camera CFrame and UserInputService
 	self.Mouse = LocalPlayer:GetMouse()
 
 	-- Clone ViewModel and store reference
@@ -470,7 +471,7 @@ function Weapon:Fire(player, mouse)
 			-- Applying Damage on client-side is not recommended because it can be easily exploited.
 			-- humanoid.Health -= damage (NOT IDEAL)
 			-- BETTER WAY: Notify the server to deal damage to the humanoid by passing it
-			DamageHum:FireServer(humanoid, damage) 
+			DamageHum:FireServer(humanoid, damage)
 			self:CreateDamageIndicator(result.Position, damage, hitPart.Name == "Head")
 		end
 	end
