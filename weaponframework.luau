@@ -119,6 +119,7 @@ function Weapon:Equip(player: Player)
 	if self.Equipped then return end
 	self.Equipped = true
 	self.Player = player
+	-- GetMouse used for simplicity, but in production you should use UserInputService and Raycasting
 	self.Mouse = LocalPlayer:GetMouse()
 
 	-- Clone ViewModel and store reference
@@ -128,7 +129,8 @@ function Weapon:Equip(player: Player)
 	self.ViewModelOffset = CFrame.new(0.25, -0.25, 0)
 
 	-- Disable collisions for all parts of the viewmodel
-	for _, part in pairs(self.ClonedViewModel:GetDescendants()) do
+	-- Using ipairs because GetDescendants() returns a array
+	for _, part in ipairs(self.ClonedViewModel:GetDescendants()) do
 		if part:IsA("BasePart") then
 			part.CanCollide = false
 		end
@@ -198,12 +200,12 @@ function Weapon:Equip(player: Player)
 	
 	-- Load Animation & Sounds for the ViewModel upon equipping
 	-- Load animations
-	for _, anim in pairs(self.ClonedViewModel.Animations:GetChildren()) do
+	for _, anim in ipairs(self.ClonedViewModel.Animations:GetChildren()) do
 		local track = self.ClonedViewModel.AnimationController.Animator:LoadAnimation(anim)
 		self.LoadedAnimations[anim.Name] = track
 	end
 	-- Load Sounds
-	for _, sound in pairs(self.ClonedViewModel.Sounds:GetChildren()) do
+	for _, sound in ipairs(self.ClonedViewModel.Sounds:GetChildren()) do
 		self.LoadedSounds[sound.Name] = sound
 	end
 	
@@ -256,7 +258,7 @@ function Weapon:Unequip(player: Player)
 	-- Destroy ViewModel
 	if self.ClonedViewModel then
 		self.ClonedViewModel:Destroy()
-		self.ClonedViewModel = nil
+		--self.ClonedViewModel = nil
 	end
 	
 	self.Player = nil -- Ensure player reference is cleared
@@ -264,7 +266,7 @@ function Weapon:Unequip(player: Player)
 	if s then s.Reloading = false end -- Ensure reloading state is reset
 	
 	-- Clean up bullet pools
-	for _, bullet in pairs(self.ActiveBullets) do
+	for _, bullet in ipairs(self.ActiveBullets) do
 		if bullet then bullet:Destroy() end
 	end
 	table.clear(self.ActiveBullets) 
@@ -314,7 +316,7 @@ function Weapon:GetBullet()
 	local bullet: Part = table.remove(self.BulletPool)
 	-- If no bullet is available, create a new one
 	if not bullet then
-		bullet = self:createBulletTemplate()
+		return self:createBulletTemplate()
 	end
 	
 	bullet:SetAttribute("InUse", true)
@@ -556,10 +558,9 @@ handleFire = function(actionName, inputState)
 		firing = true
 		-- Start a loop that fires as long as player holds mouse
 		task.spawn(function()
-			local s = state[weapon] -- Get the current weapon state
 			while firing and weapon and weapon.Equipped do
 				weapon:Fire(weapon.Player, weapon.Mouse) 
-				task.wait(s.FireRate)
+				task.wait()
 			end
 		end)
 	elseif inputState == Enum.UserInputState.End then
