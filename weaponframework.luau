@@ -12,8 +12,9 @@
 	-- A client side ammo GUI handling done through a client-script (Not Included Here)
 	-- Object Pooling for efficiently managing bullets 
 	-- A demo zombie spawner has been added for demo purposes which might not be the best for performance (Not Included Here)
-	
 ]]
+
+-- DEMO VIDEO: https://www.youtube.com/watch?v=jVHh16sEG9c
 
 -- Services
 local RunService = game:GetService("RunService")
